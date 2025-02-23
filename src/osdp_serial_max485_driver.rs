@@ -1,37 +1,28 @@
 use std::sync::{Arc, Mutex};
 
-use embedded_hal_0_2::{digital::v2::OutputPin, serial::{Read, Write}};
+use esp_idf_svc::hal::{gpio::{AnyOutputPin}, uart::UartDriver};
 use libosdp::{Channel, ChannelError};
-use max485::Max485;
 
 use crate::osdp_serial_driver::OsdpSerialDriver;
 
-pub struct OsdpSerialMax485Driver<RIDO, REDE>
-where
-    RIDO: Read<u8> + Write<u8>,
-    REDE: OutputPin,
+pub struct OsdpSerialMax485Driver<'a>
 {
-    pub max485: Arc<Mutex<Max485<RIDO, REDE>>>,
+    pub uart: UartDriver<'a>,
+    pub rede_pin: AnyOutputPin,
 }
 
-impl<RIDO, REDE> OsdpSerialMax485Driver<RIDO, REDE>
-where
-    RIDO: Read<u8> + Write<u8>,
-    REDE: OutputPin,
+impl OsdpSerialMax485Driver<'a>
 {
-    pub fn new(max485: Max485<RIDO, REDE>) -> OsdpSerialMax485Driver<RIDO, REDE> {
-        let max485 = Arc::new(Mutex::new(max485));
+    pub fn new(uart: UartDriver, rede_pin: AnyOutputPin) -> OsdpSerialMax485Driver {
         // Initialize Serial Port
         OsdpSerialMax485Driver {
-            max485,
+            uart,
+            rede_pin
         }
     }
 }
 
-impl<RIDO, REDE> OsdpSerialDriver for OsdpSerialMax485Driver<RIDO, REDE>
-where
-    RIDO: Read<u8> + Write<u8>,
-    REDE: OutputPin,
+impl OsdpSerialDriver for OsdpSerialMax485Driver<'a>
 {
     fn read(&mut self) -> Result<u8, libosdp::OsdpError> {
         todo!()

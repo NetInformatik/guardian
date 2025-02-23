@@ -45,9 +45,8 @@ fn main() {
         &osdp_uart_config,
     ).unwrap();
 
-    // Setup MAX485 Driver
+    // Setup MAX485 REDE Pin
     let osdp_max485_rede = peripherals.pins.gpio4.downgrade_output();
-    let osdp_max485 = Max485::new(osdp_uart, osdp_max485_rede.into());
 
     // Initialize Unlock Pin
     let unlock_pin_output = peripherals.pins.gpio15.downgrade_output();
@@ -57,7 +56,7 @@ fn main() {
     let allowed_card_id = vec![192, 77, 43, 64];
 
     // Setup Serial Port
-    let serial_max485_driver = OsdpSerialMax485Driver::new(osdp_max485);
+    let serial_max485_driver = OsdpSerialMax485Driver::new(osdp_uart, osdp_max485_rede);
     let serial_channel = Box::new(osdp_serial_channel::SerialChannel::new(0, serial_max485_driver));
 
     // Prepare Peripheral Device(s) Info
