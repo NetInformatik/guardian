@@ -32,8 +32,8 @@ fn main() {
     let peripherals = Peripherals::take().unwrap();
 
     // Initialize UART for OSDP
-    let osdp_uart_tx = peripherals.pins.gpio32.downgrade_output();
-    let osdp_uart_rx = peripherals.pins.gpio12.downgrade_input();
+    let osdp_uart_tx = peripherals.pins.gpio33.downgrade_output();
+    let osdp_uart_rx = peripherals.pins.gpio34.downgrade_input();
     let osdp_uart_config = config::Config::new().baudrate(Hertz(9_600));
     let osdp_uart = UartDriver::new(
         peripherals.uart1,
@@ -47,12 +47,12 @@ fn main() {
     println!("OSDP UART Initialized");
 
     // Setup MAX485 REDE Pin
-    let osdp_max485_rede_output = peripherals.pins.gpio4.downgrade_output();
+    let osdp_max485_rede_output = peripherals.pins.gpio14.downgrade_output();
     let mut osdp_max485_rede = PinDriver::output(osdp_max485_rede_output).unwrap();
     print!("OSDP MAX485 REDE Pin Initialized");
 
     // Initialize Unlock Pin
-    let unlock_pin_output = peripherals.pins.gpio15.downgrade_output();
+    let unlock_pin_output = peripherals.pins.gpio13.downgrade_output();
     let mut unlock_pin = PinDriver::output(unlock_pin_output).unwrap();
     println!("Door unlock Pin Initialized");
 
@@ -120,7 +120,7 @@ fn main() {
             }
 
             // Yield to other threads
-            thread::yield_now();
+            thread::sleep(Duration::from_millis(10));
         }
     });
     println!("OSDP Serial Thread Initialized");
@@ -153,6 +153,9 @@ fn main() {
 
     // Initialize Lock Timer
     let mut lock_timer = Instant::now();
+
+    // Initialize Info Timer
+    let mut info_timer = Instant::now();
 
     // Initialize Pin
     unlock_pin.set_low().unwrap();
@@ -189,6 +192,12 @@ fn main() {
         // Check if lock should be released
         if lock_timer < Instant::now() {
             unlock_pin.set_low().unwrap();
+        }
+
+        // Print Info
+        if info_timer < Instant::now() {
+            println!("PD Status: {:?}", cp.is_online(0));
+            info_timer = Instant::now() + Duration::from_secs(5);
         }
 
         // Sleep for ~50ms

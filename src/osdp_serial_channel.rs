@@ -1,6 +1,7 @@
 use std::{
     sync::mpmc::{Receiver, Sender},
     thread,
+    time::Duration,
 };
 
 use libosdp::{Channel, ChannelError};
@@ -82,7 +83,7 @@ impl Channel for SerialChannel {
             if self.channel_sender.is_empty() {
                 return Ok(());
             }
-            thread::yield_now();
+            thread::sleep(Duration::from_millis(1));
         }
     }
 }
