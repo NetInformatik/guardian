@@ -39,7 +39,7 @@ fn main() {
     let osdp_uart_rx = peripherals.pins.gpio12.downgrade_input();
     let osdp_uart_config = config::Config::new().baudrate(Hertz(9_600));
     let osdp_uart = UartDriver::new(
-        peripherals.uart0,
+        peripherals.uart1,
         osdp_uart_tx,
         osdp_uart_rx,
         Option::<Gpio0>::None,
@@ -47,32 +47,33 @@ fn main() {
         &osdp_uart_config,
     )
     .unwrap();
+    println!("OSDP UART Initialized");
 
     // Setup MAX485 REDE Pin
     let osdp_max485_rede_output = peripherals.pins.gpio4.downgrade_output();
     let mut osdp_max485_rede = PinDriver::output(osdp_max485_rede_output).unwrap();
+    print!("OSDP MAX485 REDE Pin Initialized");
 
     // Initialize Unlock Pin
     let unlock_pin_output = peripherals.pins.gpio15.downgrade_output();
     let mut unlock_pin = PinDriver::output(unlock_pin_output).unwrap();
+    println!("Door unlock Pin Initialized");
 
     // Prepare Settings
     let allowed_card_id = vec![192, 77, 43, 64];
 
-    // // Initialize OSDP Serial TX & RX Pipes
-    // let mut osdp_serial_tx_pipe = Pipe::<CriticalSectionRawMutex, 256>::new();
-    // let mut osdp_serial_rx_pipe = Pipe::<CriticalSectionRawMutex, 256>::new();
-
-    // // Split OSDP Serial TX & RX Pipes
+    // Split OSDP Serial TX & RX Pipes
     let (osdp_serial_tx_reader, osdp_serial_tx_writer) = unsafe { OSDP_SERIAL_TX_PIPE.split() };
     let (osdp_serial_rx_reader, osdp_serial_rx_writer) = unsafe { OSDP_SERIAL_RX_PIPE.split() };
+    println!("OSDP Serial Pipes Initialized");
 
     // Setup Serial Port
     let serial_channel = Box::new(SerialChannel::new(
-        0,
+        1,
         osdp_serial_tx_writer,
         osdp_serial_rx_reader,
     ));
+    println!("OSDP Serial Channel Initialized");
 
     // Create thread to handle serial communication
     thread::spawn(move || {
@@ -118,8 +119,12 @@ fn main() {
                 }
                 Err(_) => {}
             }
+
+            // Sleep for 1ms
+            thread::sleep(Duration::from_millis(1));
         }
     });
+    println!("OSDP Serial Thread Initialized");
 
     // Prepare Peripheral Device(s) Info
     let mut initial_pd_builder = PdInfoBuilder::new();
@@ -129,6 +134,7 @@ fn main() {
 
     // Initialize OSDP Control Panel
     let mut cp = ControlPanel::new(pd_infos).expect("Failed to initialize Control Panel");
+    println!("OSDP Control Panel Initialized");
 
     // Initialize a channel for processing events
     let (event_tx, event_rx) = channel::<OsdpEvent>();
@@ -141,9 +147,7 @@ fn main() {
         // Report Back Successful Event Handling
         return 0;
     });
-
-    // Report Ready
-    println!("Guardian Ready!");
+    println!("OSDP Event Handler Initialized");
 
     // Initialize Loop Timer
     let mut next_refresh = Instant::now() + Duration::from_millis(50);
@@ -153,6 +157,9 @@ fn main() {
 
     // Initialize Pin
     unlock_pin.set_low().unwrap();
+
+    // Report Ready
+    println!("Guardian Ready!");
 
     // Loop and wait for events
     loop {
