@@ -2,21 +2,23 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::pipe::Pipe;
+use esp_idf_svc::hal::delay;
 use esp_idf_svc::hal::gpio::{Gpio0, Gpio1, InputPin, OutputPin, PinDriver};
 use esp_idf_svc::hal::prelude::Peripherals;
 use esp_idf_svc::hal::uart::{config, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
+use esp_idf_svc::sys::ESP_ERR_TIMEOUT;
 use libosdp::{ControlPanel, OsdpEvent, PdInfoBuilder};
-use max485::Max485;
-use osdp_serial_max485_driver::OsdpSerialMax485Driver;
+use osdp_serial_channel::SerialChannel;
 
-mod osdp_serial_driver;
-mod osdp_serial_max485_driver;
 mod osdp_serial_channel;
 mod osdp_utils;
 
-// GPIO Pin for Lock
-const GPIO_LOCK: u8 = 17;
+// Pipes for OSDP Serial TX & RX
+static mut OSDP_SERIAL_TX_PIPE: Pipe<CriticalSectionRawMutex, 256> = Pipe::new();
+static mut OSDP_SERIAL_RX_PIPE: Pipe<CriticalSectionRawMutex, 256> = Pipe::new();
 
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -43,10 +45,12 @@ fn main() {
         Option::<Gpio0>::None,
         Option::<Gpio1>::None,
         &osdp_uart_config,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Setup MAX485 REDE Pin
-    let osdp_max485_rede = peripherals.pins.gpio4.downgrade_output();
+    let osdp_max485_rede_output = peripherals.pins.gpio4.downgrade_output();
+    let mut osdp_max485_rede = PinDriver::output(osdp_max485_rede_output).unwrap();
 
     // Initialize Unlock Pin
     let unlock_pin_output = peripherals.pins.gpio15.downgrade_output();
@@ -55,22 +59,80 @@ fn main() {
     // Prepare Settings
     let allowed_card_id = vec![192, 77, 43, 64];
 
+    // // Initialize OSDP Serial TX & RX Pipes
+    // let mut osdp_serial_tx_pipe = Pipe::<CriticalSectionRawMutex, 256>::new();
+    // let mut osdp_serial_rx_pipe = Pipe::<CriticalSectionRawMutex, 256>::new();
+
+    // // Split OSDP Serial TX & RX Pipes
+    let (osdp_serial_tx_reader, osdp_serial_tx_writer) = unsafe { OSDP_SERIAL_TX_PIPE.split() };
+    let (osdp_serial_rx_reader, osdp_serial_rx_writer) = unsafe { OSDP_SERIAL_RX_PIPE.split() };
+
     // Setup Serial Port
-    let serial_max485_driver = OsdpSerialMax485Driver::new(osdp_uart, osdp_max485_rede);
-    let serial_channel = Box::new(osdp_serial_channel::SerialChannel::new(0, serial_max485_driver));
+    let serial_channel = Box::new(SerialChannel::new(
+        0,
+        osdp_serial_tx_writer,
+        osdp_serial_rx_reader,
+    ));
+
+    // Create thread to handle serial communication
+    thread::spawn(move || {
+        loop {
+            // Read from UART
+            let mut read_buf = [0u8; 256];
+            match osdp_uart.read(&mut read_buf, delay::NON_BLOCK) {
+                Ok(_) => {
+                    // Write to OSDP Serial RX Pipe
+                    match osdp_serial_rx_writer.try_write(&read_buf) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            println!(
+                                "Error sending received serial data to OSDP Serial RX Pipe: {:?}",
+                                error
+                            );
+                        }
+                    }
+                }
+                // If the EspError is not a timeout, log it
+                Err(error) => {
+                    if error.code() != ESP_ERR_TIMEOUT {
+                        println!("Error Reading ESP UART Serial: {:?}", error);
+                    }
+                }
+            }
+
+            // Read from OSDP Serial TX Pipe
+            let mut write_buf = [0u8; 256];
+            match osdp_serial_tx_reader.try_read(&mut write_buf) {
+                Ok(_) => {
+                    // Set MAX485 REDE Pin to High
+                    osdp_max485_rede.set_high().unwrap();
+
+                    // Write to UART
+                    osdp_uart.write(&write_buf).unwrap();
+
+                    // Wait for UART to finish transmitting
+                    osdp_uart.wait_tx_done(delay::BLOCK).unwrap();
+
+                    // Set MAX485 REDE Pin to Low
+                    osdp_max485_rede.set_low().unwrap();
+                }
+                Err(_) => {}
+            }
+        }
+    });
 
     // Prepare Peripheral Device(s) Info
     let mut initial_pd_builder = PdInfoBuilder::new();
     initial_pd_builder = initial_pd_builder.channel(serial_channel);
     let pd_info = initial_pd_builder.build();
-    let pd_infos = vec! [pd_info];
+    let pd_infos = vec![pd_info];
 
     // Initialize OSDP Control Panel
-    let mut cp = ControlPanel::new(pd_infos).expect("Failed to initialize Control Panel"); 
+    let mut cp = ControlPanel::new(pd_infos).expect("Failed to initialize Control Panel");
 
     // Initialize a channel for processing events
     let (event_tx, event_rx) = channel::<OsdpEvent>();
-    
+
     // Setup Event Handler
     cp.set_event_callback(move |_pd, event| {
         // Send Event to Event Handler
@@ -90,7 +152,7 @@ fn main() {
     let mut lock_timer = Instant::now();
 
     // Initialize Pin
-    unlock_pin.set_low();
+    unlock_pin.set_low().unwrap();
 
     // Loop and wait for events
     loop {
@@ -107,11 +169,11 @@ fn main() {
                         println!("Access Denied!");
                     } else {
                         println!("Access Granted!");
-                        unlock_pin.set_high();
+                        unlock_pin.set_high().unwrap();
                         lock_timer = Instant::now() + Duration::from_secs(5);
                         osdp_utils::send_access_granted_beep(&mut cp).expect("Failed to send beep");
                     }
-                },
+                }
                 _ => {
                     println!("Event: {:?}", event);
                 }
@@ -120,7 +182,7 @@ fn main() {
 
         // Check if lock should be released
         if lock_timer < Instant::now() {
-            unlock_pin.set_low();
+            unlock_pin.set_low().unwrap();
         }
 
         // Sleep for ~50ms

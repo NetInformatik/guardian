@@ -4,9 +4,9 @@ target = "xtensa-esp32-espidf"
 [target.xtensa-esp32-espidf]
 linker = "ldproxy"
 # For Local development
-#runner = "espflash flash --monitor"
+runner = "espflash flash --monitor"
 # For Remote development
-runner = "bash remote-engineering-pi-run.sh"
+#runner = "bash remote-engineering-pi-run.sh"
 rustflags = [ "--cfg",  "espidf_time64"]
 
 [unstable]
