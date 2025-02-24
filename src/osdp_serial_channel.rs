@@ -47,9 +47,6 @@ impl Channel for SerialChannel {
                 },
             }
         }
-        if i == 0 {
-            return Err(ChannelError::WouldBlock);
-        }
         Ok(i)
     }
 

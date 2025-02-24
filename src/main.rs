@@ -17,6 +17,20 @@ use osdp_serial_channel::SerialChannel;
 mod osdp_serial_channel;
 mod osdp_utils;
 
+#[macro_use]
+extern crate lazy_static;
+
+lazy_static! {
+    // Record a starting point when the program begins.
+    static ref START: Instant = Instant::now();
+}
+
+#[no_mangle]
+pub extern "C" fn osdp_millis_now() -> i64 {
+    let elapsed = START.elapsed();
+    elapsed.as_millis() as i64
+}
+
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
@@ -24,6 +38,10 @@ fn main() {
 
     // Bind the log crate to the ESP Logging facilities
     esp_idf_svc::log::EspLogger::initialize_default();
+
+    // Log all OSDP messages
+    esp_idf_svc::log::set_target_level("osdp::cp", log::LevelFilter::Trace).unwrap();
+    esp_idf_svc::log::set_target_level("libosdp::cp", log::LevelFilter::Trace).unwrap();
 
     // Report Start
     println!("Initializing Guardian...");
@@ -173,6 +191,7 @@ fn main() {
             // Process Event
             match event {
                 libosdp::OsdpEvent::CardRead(card_read_event) => {
+                    println!("Card Read: {:?}", card_read_event);
                     let card_data = card_read_event.data;
                     if card_data != allowed_card_id {
                         println!("Access Denied!");
@@ -196,7 +215,10 @@ fn main() {
 
         // Print Info
         if info_timer < Instant::now() {
-            println!("PD Status: {:?}", cp.is_online(0));
+            // Retrieve PD Status
+            let pd_status = cp.is_online(0);
+
+            println!("PD Status: {:?}", pd_status);
             info_timer = Instant::now() + Duration::from_secs(5);
         }
 
