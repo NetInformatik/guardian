@@ -1,9 +1,10 @@
+#![feature(mpmc_channel)]
+
+use std::sync::mpmc::sync_channel;
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::pipe::Pipe;
 use esp_idf_svc::hal::delay;
 use esp_idf_svc::hal::gpio::{Gpio0, Gpio1, InputPin, OutputPin, PinDriver};
 use esp_idf_svc::hal::prelude::Peripherals;
@@ -15,10 +16,6 @@ use osdp_serial_channel::SerialChannel;
 
 mod osdp_serial_channel;
 mod osdp_utils;
-
-// Pipes for OSDP Serial TX & RX
-static mut OSDP_SERIAL_TX_PIPE: Pipe<CriticalSectionRawMutex, 256> = Pipe::new();
-static mut OSDP_SERIAL_RX_PIPE: Pipe<CriticalSectionRawMutex, 256> = Pipe::new();
 
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -62,16 +59,16 @@ fn main() {
     // Prepare Settings
     let allowed_card_id = vec![192, 77, 43, 64];
 
-    // Split OSDP Serial TX & RX Pipes
-    let (osdp_serial_tx_reader, osdp_serial_tx_writer) = unsafe { OSDP_SERIAL_TX_PIPE.split() };
-    let (osdp_serial_rx_reader, osdp_serial_rx_writer) = unsafe { OSDP_SERIAL_RX_PIPE.split() };
-    println!("OSDP Serial Pipes Initialized");
+    // Initialize OSDP Serial TX & RX MPMC Queues
+    let (osdp_serial_tx_sender, osdp_serial_tx_receiver) = sync_channel::<u8>(256);
+    let (osdp_serial_rx_sender, osdp_serial_rx_receiver) = sync_channel::<u8>(256);
+    println!("OSDP Serial MPMC Queues Initialized");
 
     // Setup Serial Port
     let serial_channel = Box::new(SerialChannel::new(
         1,
-        osdp_serial_tx_writer,
-        osdp_serial_rx_reader,
+        osdp_serial_tx_sender,
+        osdp_serial_rx_receiver,
     ));
     println!("OSDP Serial Channel Initialized");
 
@@ -82,14 +79,18 @@ fn main() {
             let mut read_buf = [0u8; 256];
             match osdp_uart.read(&mut read_buf, delay::NON_BLOCK) {
                 Ok(_) => {
-                    // Write to OSDP Serial RX Pipe
-                    match osdp_serial_rx_writer.try_write(&read_buf) {
-                        Ok(_) => {}
-                        Err(error) => {
-                            println!(
-                                "Error sending received serial data to OSDP Serial RX Pipe: {:?}",
-                                error
-                            );
+                    // Write to OSDP Serial RX Queue Producer
+                    for byte in read_buf.iter() {
+                        match osdp_serial_rx_sender.try_send(*byte) {
+                            Ok(_) => {}
+                            Err(error) => match error {
+                                std::sync::mpmc::TrySendError::Full(_) => {
+                                    println!("WARNING: OSDP Serial RX Queue Full!");
+                                }
+                                std::sync::mpmc::TrySendError::Disconnected(_) => {
+                                    print!("ERROR: OSDP Serial RX Queue Disconnected!");
+                                }
+                            },
                         }
                     }
                 }
@@ -102,26 +103,24 @@ fn main() {
             }
 
             // Read from OSDP Serial TX Pipe
-            let mut write_buf = [0u8; 256];
-            match osdp_serial_tx_reader.try_read(&mut write_buf) {
-                Ok(_) => {
-                    // Set MAX485 REDE Pin to High
-                    osdp_max485_rede.set_high().unwrap();
+            if !osdp_serial_tx_receiver.is_empty() {
+                // Set MAX485 REDE Pin to High
+                osdp_max485_rede.set_high().unwrap();
 
-                    // Write to UART
-                    osdp_uart.write(&write_buf).unwrap();
-
-                    // Wait for UART to finish transmitting
-                    osdp_uart.wait_tx_done(delay::BLOCK).unwrap();
-
-                    // Set MAX485 REDE Pin to Low
-                    osdp_max485_rede.set_low().unwrap();
+                // For each byte in the queue, write it to the UART
+                for byte in osdp_serial_tx_receiver.try_iter() {
+                    osdp_uart.write(&[byte]).unwrap();
                 }
-                Err(_) => {}
+
+                // Wait for UART to finish transmitting
+                osdp_uart.wait_tx_done(delay::BLOCK).unwrap();
+
+                // Set MAX485 REDE Pin to Low
+                osdp_max485_rede.set_low().unwrap();
             }
 
-            // Sleep for 1ms
-            thread::sleep(Duration::from_millis(1));
+            // Yield to other threads
+            thread::yield_now();
         }
     });
     println!("OSDP Serial Thread Initialized");

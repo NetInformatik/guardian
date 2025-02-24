@@ -25,7 +25,6 @@ experimental = ["esp-idf-svc/experimental"]
 [dependencies]
 log = {version = "0.4.26", default-features = true, features = []}
 esp-idf-svc = { version = "0.51", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
-embassy-sync = { version = "0.6.2", default-features = true, features = [] }
 libosdp = {version = "0.1.9", default-features = true, features = []}
 
 [build-dependencies]
