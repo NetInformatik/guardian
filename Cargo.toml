@@ -24,12 +24,20 @@ experimental = ["esp-idf-svc/experimental"]
 
 [dependencies]
 log = {version = "0.4.26", default-features = true, features = []}
+heapless = { version = "0.8.0", default-features = false}
+hex = { version = "0.4.3", default-features = true}
 esp-idf-svc = { version = "0.51", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
 libosdp = {version = "0.1.9", default-features = true, features = []}
 lazy_static = {version = "1.5.0", default-features = true, features = []}
+serde = { version = "1.0.218", default-features = true }
+serde_json = { version = "1.0.139", default-features = true }
+atomic-time = { version = "0.1.5", default-features = true }
 
 [build-dependencies]
 embuild = "0.33"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_websocket_client", version = "1.1.0" }
 
 [patch.crates-io]
 libosdp-sys = { path = "../libosdp-rs/libosdp-sys"}

@@ -5,31 +5,27 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use esp_idf_svc::eth::EthDriver;
 use esp_idf_svc::hal::delay;
-use esp_idf_svc::hal::gpio::{Gpio0, Gpio1, InputPin, OutputPin, PinDriver};
-use esp_idf_svc::hal::prelude::Peripherals;
+use esp_idf_svc::hal::gpio::{Gpio0, Gpio1, Gpio16, Gpio17, InputPin, OutputPin, PinDriver};
 use esp_idf_svc::hal::uart::{config, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
 use esp_idf_svc::sys::ESP_ERR_TIMEOUT;
 use libosdp::{ControlPanel, OsdpEvent, PdInfoBuilder};
 use osdp_serial_channel::SerialChannel;
 
+mod aperture_core;
+mod aperture_door_security;
+mod aperture_wifi;
+mod aperture_ws_client;
+mod esp_hw;
+mod manage_command;
 mod osdp_serial_channel;
+mod osdp_time_patch;
 mod osdp_utils;
 
 #[macro_use]
 extern crate lazy_static;
-
-lazy_static! {
-    // Record a starting point when the program begins.
-    static ref START: Instant = Instant::now();
-}
-
-#[no_mangle]
-pub extern "C" fn osdp_millis_now() -> i64 {
-    let elapsed = START.elapsed();
-    elapsed.as_millis() as i64
-}
 
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -46,8 +42,36 @@ fn main() {
     // Report Start
     println!("Initializing Guardian...");
 
-    // Retrieve periherals
-    let peripherals = Peripherals::take().unwrap();
+    // Fetch the peripherals, event loop, and NVS partition
+    let (peripherals, sys_loop, _nvs) = aperture_core::system_setup();
+
+    // Initialize Ethernet Driver
+    let eth_driver = EthDriver::new_rmii(
+        peripherals.mac,
+        peripherals.pins.gpio25,
+        peripherals.pins.gpio26,
+        peripherals.pins.gpio27,
+        peripherals.pins.gpio23,
+        peripherals.pins.gpio22,
+        peripherals.pins.gpio21,
+        peripherals.pins.gpio19,
+        peripherals.pins.gpio18,
+        esp_idf_svc::eth::RmiiClockConfig::<Gpio0, Gpio16, Gpio17>::OutputInvertedGpio17(
+            peripherals.pins.gpio17,
+        ),
+        Some(peripherals.pins.gpio5),
+        // Replace with IP101 if you have that variant, or with some of the others in the `RmiiEthChipset`` enum
+        esp_idf_svc::eth::RmiiEthChipset::LAN87XX,
+        Some(0),
+        sys_loop.clone(),
+    )
+    .unwrap();
+    let eth = esp_idf_svc::eth::EspEth::wrap(eth_driver).unwrap();
+    let mut eth = esp_idf_svc::eth::BlockingEth::wrap(eth, sys_loop.clone()).unwrap();
+
+    // Start Ethernet
+    eth.start().unwrap();
+    println!("Ethernet Driver Started");
 
     // Initialize UART for OSDP
     let osdp_uart_tx = peripherals.pins.gpio33.downgrade_output();
@@ -179,53 +203,72 @@ fn main() {
     unlock_pin.set_low().unwrap();
 
     // Report Ready
-    println!("Guardian Ready!");
+    println!("Guardian Local System Initialization Complete!");
 
-    // Loop and wait for events
-    loop {
-        // Refresh Control Panel state
-        cp.refresh();
+    // Create thread to handle OSDP CP events & other tasks
+    thread::spawn(move || {
+        // Loop and wait for events
+        loop {
+            // Refresh Control Panel state
+            cp.refresh();
 
-        // Check for events
-        while let Ok(event) = event_rx.try_recv() {
-            // Process Event
-            match event {
-                libosdp::OsdpEvent::CardRead(card_read_event) => {
-                    println!("Card Read: {:?}", card_read_event);
-                    let card_data = card_read_event.data;
-                    if card_data != allowed_card_id {
-                        println!("Access Denied!");
-                    } else {
-                        println!("Access Granted!");
-                        unlock_pin.set_high().unwrap();
-                        lock_timer = Instant::now() + Duration::from_secs(5);
-                        osdp_utils::send_access_granted_beep(&mut cp).expect("Failed to send beep");
+            // Check for events
+            while let Ok(event) = event_rx.try_recv() {
+                // Process Event
+                match event {
+                    libosdp::OsdpEvent::CardRead(card_read_event) => {
+                        println!("Card Read: {:?}", card_read_event);
+                        let card_data = card_read_event.data;
+                        if card_data != allowed_card_id {
+                            println!("Access Denied!");
+                        } else {
+                            println!("Access Granted!");
+                            unlock_pin.set_high().unwrap();
+                            lock_timer = Instant::now() + Duration::from_secs(5);
+                            osdp_utils::send_access_granted_beep(&mut cp)
+                                .expect("Failed to send beep");
+                        }
+                    }
+                    _ => {
+                        println!("Event: {:?}", event);
                     }
                 }
-                _ => {
-                    println!("Event: {:?}", event);
-                }
+            }
+
+            // Check if lock should be released
+            if lock_timer < Instant::now() {
+                unlock_pin.set_low().unwrap();
+            }
+
+            // Print Info
+            if info_timer < Instant::now() {
+                // Retrieve PD Status
+                let pd_status = cp.is_online(0);
+
+                println!("PD Status: {:?}", pd_status);
+                info_timer = Instant::now() + Duration::from_secs(5);
+            }
+
+            // Sleep for ~50ms
+            thread::sleep(next_refresh.saturating_duration_since(Instant::now()));
+
+            // Update next refresh time
+            next_refresh += Duration::from_millis(50);
+        }
+    });
+
+    loop {
+        // Retrieve IP info
+        match eth.eth().netif().get_ip_info() {
+            Ok(ip_info) => {
+                println!("IP Info: {:?}", ip_info);
+            }
+            Err(error) => {
+                println!("Error Retrieving IP Info: {:?}", error);
             }
         }
 
-        // Check if lock should be released
-        if lock_timer < Instant::now() {
-            unlock_pin.set_low().unwrap();
-        }
-
-        // Print Info
-        if info_timer < Instant::now() {
-            // Retrieve PD Status
-            let pd_status = cp.is_online(0);
-
-            println!("PD Status: {:?}", pd_status);
-            info_timer = Instant::now() + Duration::from_secs(5);
-        }
-
-        // Sleep for ~50ms
-        thread::sleep(next_refresh.saturating_duration_since(Instant::now()));
-
-        // Update next refresh time
-        next_refresh += Duration::from_millis(50);
+        // Sleep for 5 seconds
+        thread::sleep(Duration::from_secs(5));
     }
 }
