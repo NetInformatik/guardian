@@ -1,31 +1,43 @@
 #![feature(mpmc_channel)]
 
+use std::sync::atomic::Ordering;
 use std::sync::mpmc::sync_channel;
-use std::sync::mpsc::channel;
-use std::thread;
+use std::sync::mpsc::{self, channel};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{mem, thread};
 
+use aperture_door_security::DoorSecurityDoorType;
+use aperture_ws_client::nuke_ws_client;
+use atomic_time::AtomicInstant;
 use esp_idf_svc::eth::EthDriver;
 use esp_idf_svc::hal::delay;
 use esp_idf_svc::hal::gpio::{Gpio0, Gpio1, Gpio16, Gpio17, InputPin, OutputPin, PinDriver};
 use esp_idf_svc::hal::uart::{config, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
 use esp_idf_svc::sys::ESP_ERR_TIMEOUT;
+use esp_idf_svc::ws::FrameType;
 use libosdp::{ControlPanel, OsdpEvent, PdInfoBuilder};
+use manage_command::{MANAGECommand, MANAGEReport};
 use osdp_serial_channel::SerialChannel;
 
 mod aperture_core;
 mod aperture_door_security;
-mod aperture_wifi;
 mod aperture_ws_client;
 mod esp_hw;
 mod manage_command;
 mod osdp_serial_channel;
 mod osdp_time_patch;
-mod osdp_utils;
 
 #[macro_use]
 extern crate lazy_static;
+
+// Core Parameters
+const WS_BASE_URI: &str = "wss://manage.netinformatik.com/ws/office-security/door-commands/";
+const WS_TIMEOUT: Duration = Duration::from_secs(10);
+const SYSTEM_HEALTH_LOOP_INTERVAL: Duration = Duration::from_secs(5);
+const DOOR_SECURITY_LOOP_INTERVAL: Duration = Duration::from_millis(100);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 fn main() {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -40,7 +52,7 @@ fn main() {
     esp_idf_svc::log::set_target_level("libosdp::cp", log::LevelFilter::Trace).unwrap();
 
     // Report Start
-    println!("Initializing Guardian...");
+    log::info!("Initializing Guardian...");
 
     // Fetch the peripherals, event loop, and NVS partition
     let (peripherals, sys_loop, _nvs) = aperture_core::system_setup();
@@ -71,7 +83,13 @@ fn main() {
 
     // Start Ethernet
     eth.start().unwrap();
-    println!("Ethernet Driver Started");
+    log::info!("Ethernet Driver Started");
+
+    // Setup channel for command data
+    let (command_channel_tx, command_channel_rx) = mpsc::channel::<MANAGECommand>();
+
+    // Setup channel for report data
+    let (report_channel_tx, report_channel_rx) = mpsc::channel::<MANAGEReport>();
 
     // Initialize UART for OSDP
     let osdp_uart_tx = peripherals.pins.gpio33.downgrade_output();
@@ -86,25 +104,34 @@ fn main() {
         &osdp_uart_config,
     )
     .unwrap();
-    println!("OSDP UART Initialized");
+    log::info!("OSDP UART Initialized");
 
     // Setup MAX485 REDE Pin
     let osdp_max485_rede_output = peripherals.pins.gpio14.downgrade_output();
     let mut osdp_max485_rede = PinDriver::output(osdp_max485_rede_output).unwrap();
     print!("OSDP MAX485 REDE Pin Initialized");
 
-    // Initialize Unlock Pin
-    let unlock_pin_output = peripherals.pins.gpio13.downgrade_output();
-    let mut unlock_pin = PinDriver::output(unlock_pin_output).unwrap();
-    println!("Door unlock Pin Initialized");
+    // Initialize Open, Close, Stop/Unlock Pins
+    let stop_unlock_pin_output = peripherals.pins.gpio13.downgrade_output();
+    let stop_unlock_pin = PinDriver::output(stop_unlock_pin_output).unwrap();
+    let open_pin_output = peripherals.pins.gpio32.downgrade_output();
+    let open_pin = PinDriver::output(open_pin_output).unwrap();
+    let close_pin_output = peripherals.pins.gpio4.downgrade_output();
+    let close_pin = PinDriver::output(close_pin_output).unwrap();
 
-    // Prepare Settings
-    let allowed_card_id = vec![192, 77, 43, 64];
+    // Initialize the door security handler
+    let mut door_security = aperture_door_security::DoorSecurity::new(
+        DoorSecurityDoorType::LockFailSecure,
+        open_pin,
+        close_pin,
+        stop_unlock_pin,
+    );
+    log::info!("Door Security Pin Handler System Initialized");
 
     // Initialize OSDP Serial TX & RX MPMC Queues
     let (osdp_serial_tx_sender, osdp_serial_tx_receiver) = sync_channel::<u8>(256);
     let (osdp_serial_rx_sender, osdp_serial_rx_receiver) = sync_channel::<u8>(256);
-    println!("OSDP Serial MPMC Queues Initialized");
+    log::info!("OSDP Serial MPMC Queues Initialized");
 
     // Setup Serial Port
     let serial_channel = Box::new(SerialChannel::new(
@@ -112,7 +139,7 @@ fn main() {
         osdp_serial_tx_sender,
         osdp_serial_rx_receiver,
     ));
-    println!("OSDP Serial Channel Initialized");
+    log::info!("OSDP Serial Channel Initialized");
 
     // Create thread to handle serial communication
     thread::spawn(move || {
@@ -127,7 +154,7 @@ fn main() {
                             Ok(_) => {}
                             Err(error) => match error {
                                 std::sync::mpmc::TrySendError::Full(_) => {
-                                    println!("WARNING: OSDP Serial RX Queue Full!");
+                                    log::info!("WARNING: OSDP Serial RX Queue Full!");
                                 }
                                 std::sync::mpmc::TrySendError::Disconnected(_) => {
                                     print!("ERROR: OSDP Serial RX Queue Disconnected!");
@@ -139,7 +166,7 @@ fn main() {
                 // If the EspError is not a timeout, log it
                 Err(error) => {
                     if error.code() != ESP_ERR_TIMEOUT {
-                        println!("Error Reading ESP UART Serial: {:?}", error);
+                        log::info!("Error Reading ESP UART Serial: {:?}", error);
                     }
                 }
             }
@@ -165,7 +192,7 @@ fn main() {
             thread::sleep(Duration::from_millis(10));
         }
     });
-    println!("OSDP Serial Thread Initialized");
+    log::info!("OSDP Serial Thread Initialized");
 
     // Prepare Peripheral Device(s) Info
     let mut initial_pd_builder = PdInfoBuilder::new();
@@ -175,7 +202,7 @@ fn main() {
 
     // Initialize OSDP Control Panel
     let mut cp = ControlPanel::new(pd_infos).expect("Failed to initialize Control Panel");
-    println!("OSDP Control Panel Initialized");
+    log::info!("OSDP Control Panel Initialized");
 
     // Initialize a channel for processing events
     let (event_tx, event_rx) = channel::<OsdpEvent>();
@@ -188,24 +215,19 @@ fn main() {
         // Report Back Successful Event Handling
         return 0;
     });
-    println!("OSDP Event Handler Initialized");
+    log::info!("OSDP Event Handler Initialized");
 
     // Initialize Loop Timer
     let mut next_refresh = Instant::now() + Duration::from_millis(50);
 
-    // Initialize Lock Timer
-    let mut lock_timer = Instant::now();
-
     // Initialize Info Timer
     let mut info_timer = Instant::now();
 
-    // Initialize Pin
-    unlock_pin.set_low().unwrap();
-
     // Report Ready
-    println!("Guardian Local System Initialization Complete!");
+    log::info!("Guardian Local System Initialization Complete!");
 
     // Create thread to handle OSDP CP events & other tasks
+    let osdp_event_report_channel_tx = report_channel_tx.clone();
     thread::spawn(move || {
         // Loop and wait for events
         loop {
@@ -217,27 +239,16 @@ fn main() {
                 // Process Event
                 match event {
                     libosdp::OsdpEvent::CardRead(card_read_event) => {
-                        println!("Card Read: {:?}", card_read_event);
-                        let card_data = card_read_event.data;
-                        if card_data != allowed_card_id {
-                            println!("Access Denied!");
-                        } else {
-                            println!("Access Granted!");
-                            unlock_pin.set_high().unwrap();
-                            lock_timer = Instant::now() + Duration::from_secs(5);
-                            osdp_utils::send_access_granted_beep(&mut cp)
-                                .expect("Failed to send beep");
-                        }
+                        log::info!("Card Read: {:?}", card_read_event);
+                        let report = MANAGEReport::OsdpCardRead {
+                            event: card_read_event,
+                        };
+                        osdp_event_report_channel_tx.send(report).unwrap();
                     }
                     _ => {
-                        println!("Event: {:?}", event);
+                        log::info!("Event: {:?}", event);
                     }
                 }
-            }
-
-            // Check if lock should be released
-            if lock_timer < Instant::now() {
-                unlock_pin.set_low().unwrap();
             }
 
             // Print Info
@@ -245,7 +256,7 @@ fn main() {
                 // Retrieve PD Status
                 let pd_status = cp.is_online(0);
 
-                println!("PD Status: {:?}", pd_status);
+                log::info!("PD Status: {:?}", pd_status);
                 info_timer = Instant::now() + Duration::from_secs(5);
             }
 
@@ -257,18 +268,92 @@ fn main() {
         }
     });
 
+    // Initialize the door security last tick time
+    let door_security_last_tick = Arc::new(AtomicInstant::now());
+    let last_tick = Arc::clone(&door_security_last_tick);
+
+    // Create thread to handle door system
+    thread::spawn(move || {
+        loop {
+            match command_channel_rx.try_recv() {
+                Ok(command) => {
+                    // We received a command, handle it
+                    door_security.handle_command(command);
+                }
+                Err(_) => {
+                    // Tick the door security system and sleep for a while
+                    door_security.tick();
+                    door_security_last_tick.store(Instant::now(), Ordering::SeqCst);
+                    thread::sleep(DOOR_SECURITY_LOOP_INTERVAL);
+                }
+            }
+        }
+    });
+
+    // Connect to MANAGE Door Security Websocket
+    let mut ws_client =
+        aperture_ws_client::ws_client_setup(WS_BASE_URI, WS_TIMEOUT, command_channel_tx.clone());
+
+    // Initialize Heartbeat
+    let mut next_heartbeat = Instant::now();
+
     loop {
-        // Retrieve IP info
+        // Sleep for a while
+        thread::sleep(SYSTEM_HEALTH_LOOP_INTERVAL);
+
+        // Display IP Info
         match eth.eth().netif().get_ip_info() {
             Ok(ip_info) => {
-                println!("IP Info: {:?}", ip_info);
+                log::info!("IP Info: {:?}", ip_info);
             }
             Err(error) => {
-                println!("Error Retrieving IP Info: {:?}", error);
+                log::info!("Error Retrieving IP Info: {:?}", error);
             }
         }
 
-        // Sleep for 5 seconds
-        thread::sleep(Duration::from_secs(5));
+        // Check on WebSocket Client
+        // --- WebSocket ---
+        if !aperture_ws_client::WS_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
+            log::warn!("WebSocket is closed! Reconnecting...");
+
+            // Nuke the old WebSocket client (calls unsafe destroy method)
+            nuke_ws_client(&ws_client);
+
+            // Forget the old WebSocket client
+            mem::forget(ws_client);
+
+            // Create a new WebSocket client
+            ws_client = aperture_ws_client::ws_client_setup(
+                WS_BASE_URI,
+                WS_TIMEOUT,
+                command_channel_tx.clone(),
+            );
+        }
+
+        // Prepare Heartbeat
+        let now = Instant::now();
+        if next_heartbeat < now {
+            next_heartbeat = now + HEARTBEAT_INTERVAL;
+            let elapsed = last_tick.load(Ordering::SeqCst).elapsed();
+            let heartbeat = MANAGEReport::Heartbeat {
+                is_healthy: elapsed.as_secs() < 2,
+            };
+            report_channel_tx.send(heartbeat).unwrap();
+        }
+
+        // Send any reports
+        while let Ok(report) = report_channel_rx.try_recv() {
+            match ws_client.send(
+                FrameType::Text(false),
+                serde_json::to_string(&report).unwrap().as_bytes(),
+            ) {
+                Ok(_) => {
+                    log::info!("Sent report to MANAGE!: {:?}", report);
+                }
+                Err(_) => {
+                    log::error!("Failed to send report to MANAGE!: {:?}", report);
+                }
+            }
+        }
     }
 }

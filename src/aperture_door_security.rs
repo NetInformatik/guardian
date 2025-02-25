@@ -1,50 +1,35 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use esp_idf_svc::hal::gpio::{Output, Pin, PinDriver};
+use esp_idf_svc::hal::gpio::{AnyOutputPin, Output, PinDriver};
 
 use super::manage_command::{MANAGECommand, MANAGECommandType};
 
 pub enum DoorSecurityDoorType {
-    Motorized,
+    _Motorized,
     LockFailSecure,
 }
 
-pub struct DoorSecurity<'d, OP, CP, SP, UP>
-where
-    OP: Pin,
-    CP: Pin,
-    SP: Pin,
-    UP: Pin,
-{
+pub struct DoorSecurity<'d> {
     door_type: DoorSecurityDoorType,
-    door_open_pin: PinDriver<'d, OP, Output>,
-    door_close_pin: PinDriver<'d, CP, Output>,
-    door_stop_pin: PinDriver<'d, SP, Output>,
-    door_unlock_pin: PinDriver<'d, UP, Output>,
+    door_open_pin: PinDriver<'d, AnyOutputPin, Output>,
+    door_close_pin: PinDriver<'d, AnyOutputPin, Output>,
+    door_stop_unlock_pin: PinDriver<'d, AnyOutputPin, Output>,
     last_action_time: Instant,
     lock_timer: Instant,
 }
 
-impl<'d, OP, CP, SP, UP> DoorSecurity<'d, OP, CP, SP, UP>
-where
-    OP: Pin,
-    CP: Pin,
-    SP: Pin,
-    UP: Pin,
-{
+impl<'d> DoorSecurity<'d> {
     pub fn new(
         door_type: DoorSecurityDoorType,
-        door_open_pin: PinDriver<'d, OP, Output>,
-        door_close_pin: PinDriver<'d, CP, Output>,
-        door_stop_pin: PinDriver<'d, SP, Output>,
-        door_unlock_pin: PinDriver<'d, UP, Output>,
+        door_open_pin: PinDriver<'d, AnyOutputPin, Output>,
+        door_close_pin: PinDriver<'d, AnyOutputPin, Output>,
+        door_stop_unlock_pin: PinDriver<'d, AnyOutputPin, Output>,
     ) -> Self {
         Self {
             door_type,
             door_open_pin,
             door_close_pin,
-            door_stop_pin,
-            door_unlock_pin,
+            door_stop_unlock_pin,
             last_action_time: Instant::now(),
             lock_timer: Instant::now(),
         }
@@ -52,7 +37,7 @@ where
 
     pub fn tick(&mut self) {
         match self.door_type {
-            DoorSecurityDoorType::Motorized => {
+            DoorSecurityDoorType::_Motorized => {
                 self.tick_motorized();
             }
             DoorSecurityDoorType::LockFailSecure => {
@@ -67,12 +52,15 @@ where
             // Ensure all pins are low
             self.door_open_pin.set_low().unwrap();
             self.door_close_pin.set_low().unwrap();
-            self.door_stop_pin.set_low().unwrap();
+            self.door_stop_unlock_pin.set_low().unwrap();
         }
     }
 
     fn tick_lock_fail_secure(&mut self) {
         // Check if the lock should be released
+        if self.lock_timer < Instant::now() {
+            self.door_stop_unlock_pin.set_low().unwrap();
+        }
     }
 
     pub fn handle_command(&mut self, command: MANAGECommand) {
@@ -85,7 +73,7 @@ where
 
                 // Ensure all other pins are low
                 self.door_close_pin.set_low().unwrap();
-                self.door_stop_pin.set_low().unwrap();
+                self.door_stop_unlock_pin.set_low().unwrap();
 
                 // Set the door open pin high
                 self.door_open_pin.set_high().unwrap();
@@ -98,7 +86,7 @@ where
 
                 // Ensure all other pins are low
                 self.door_open_pin.set_low().unwrap();
-                self.door_stop_pin.set_low().unwrap();
+                self.door_stop_unlock_pin.set_low().unwrap();
 
                 // Set the door close pin high
                 self.door_close_pin.set_high().unwrap();
@@ -114,7 +102,16 @@ where
                 self.door_close_pin.set_low().unwrap();
 
                 // Set the door stop pin high
-                self.door_stop_pin.set_high().unwrap();
+                self.door_stop_unlock_pin.set_high().unwrap();
+            }
+            MANAGECommandType::DoorUnlock(duration) => {
+                log::info!("DOOR ACTION - Unlocking the door for {} seconds!", duration);
+
+                // Update the last action time
+                self.lock_timer = Instant::now() + Duration::from_secs(duration as u64);
+
+                // Set the door unlock pin high
+                self.door_stop_unlock_pin.set_high().unwrap();
             }
         }
     }
