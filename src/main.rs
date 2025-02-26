@@ -18,6 +18,7 @@ use esp_idf_svc::hal::uart::{config, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
 use esp_idf_svc::sys::ESP_ERR_TIMEOUT;
 use esp_idf_svc::ws::FrameType;
+use guardian_global_status::PD_ONLINE;
 use libosdp::{ControlPanel, OsdpEvent, PdInfoBuilder};
 use manage_command::{MANAGECommand, MANAGEReport};
 use osdp_serial_channel::SerialChannel;
@@ -26,6 +27,7 @@ mod aperture_core;
 mod aperture_door_security;
 mod aperture_ws_client;
 mod esp_hw;
+mod guardian_global_status;
 mod manage_command;
 mod osdp_serial_channel;
 mod osdp_time_patch;
@@ -237,9 +239,6 @@ fn main() {
     // Initialize Loop Timer
     let mut next_refresh = Instant::now() + Duration::from_millis(50);
 
-    // Initialize Info Timer
-    let mut info_timer = Instant::now();
-
     // Report Ready
     log::info!("Guardian Local System Initialization Complete!");
 
@@ -269,13 +268,7 @@ fn main() {
             }
 
             // Print Info
-            if info_timer < Instant::now() {
-                // Retrieve PD Status
-                let pd_status = cp.is_online(0);
-
-                log::info!("PD Status: {:?}", pd_status);
-                info_timer = Instant::now() + Duration::from_secs(5);
-            }
+            PD_ONLINE.store(cp.is_online(0), Ordering::SeqCst);
 
             // Sleep for ~50ms
             thread::sleep(next_refresh.saturating_duration_since(Instant::now()));
@@ -359,15 +352,22 @@ fn main() {
         // Sleep for a while
         thread::sleep(SYSTEM_HEALTH_LOOP_INTERVAL);
 
-        // Display IP Info
+        // Display System Status
+        let status_ip_info: String;
         match eth.eth().netif().get_ip_info() {
             Ok(ip_info) => {
-                log::info!("IP Info: {:?}", ip_info);
+                status_ip_info = format!("IP: {}\nSubnet: {}\n", ip_info.ip, ip_info.subnet,);
             }
             Err(error) => {
-                log::info!("Error Retrieving IP Info: {:?}", error);
+                status_ip_info = format!("No IP Info Available! ({:?})\n", error);
             }
         }
+        let status = format!(
+            "GUARDIAN SYSTEM STATUS\n---\nOSDP Online: {}\n{}---",
+            PD_ONLINE.load(Ordering::SeqCst),
+            status_ip_info,
+        );
+        log::info!("{}", status);
 
         // Prepare Heartbeat
         let now = Instant::now();
