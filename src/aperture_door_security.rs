@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use esp_idf_svc::hal::gpio::{AnyOutputPin, Output, PinDriver};
 
-use super::manage_command::{MANAGECommand, MANAGECommandType};
+use super::manage_command::MANAGECommand;
 
 pub enum DoorSecurityDoorType {
     _Motorized,
@@ -64,8 +64,8 @@ impl<'d> DoorSecurity<'d> {
     }
 
     pub fn handle_command(&mut self, command: MANAGECommand) {
-        match command.command {
-            MANAGECommandType::DoorOpen => {
+        match command {
+            MANAGECommand::DoorOpen => {
                 log::info!("DOOR ACTION - Opening the door!");
 
                 // Update the last action time
@@ -78,7 +78,7 @@ impl<'d> DoorSecurity<'d> {
                 // Set the door open pin high
                 self.door_open_pin.set_high().unwrap();
             }
-            MANAGECommandType::DoorClose => {
+            MANAGECommand::DoorClose => {
                 log::info!("DOOR ACTION - Closing the door!");
 
                 // Update the last action time
@@ -91,7 +91,7 @@ impl<'d> DoorSecurity<'d> {
                 // Set the door close pin high
                 self.door_close_pin.set_high().unwrap();
             }
-            MANAGECommandType::DoorStop => {
+            MANAGECommand::DoorStop => {
                 log::info!("DOOR ACTION - ***STOPPING*** the door!");
 
                 // Update the last action time
@@ -104,7 +104,7 @@ impl<'d> DoorSecurity<'d> {
                 // Set the door stop pin high
                 self.door_stop_unlock_pin.set_high().unwrap();
             }
-            MANAGECommandType::DoorUnlock(duration) => {
+            MANAGECommand::DoorUnlock { duration } => {
                 log::info!("DOOR ACTION - Unlocking the door for {} seconds!", duration);
 
                 // Update the last action time

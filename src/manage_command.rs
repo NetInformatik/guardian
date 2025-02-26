@@ -2,7 +2,8 @@ use libosdp::OsdpEventCardRead;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum MANAGECommandType {
+#[serde(tag = "command")]
+pub enum MANAGECommand {
     #[serde(rename = "door.open")]
     DoorOpen,
     #[serde(rename = "door.close")]
@@ -10,12 +11,7 @@ pub enum MANAGECommandType {
     #[serde(rename = "door.stop")]
     DoorStop,
     #[serde(rename = "door.unlock")]
-    DoorUnlock(u32),
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct MANAGECommand {
-    pub command: MANAGECommandType,
+    DoorUnlock { duration: u32 },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
