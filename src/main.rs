@@ -300,88 +300,89 @@ fn main() {
         }
     });
 
-    // Connect to MANAGE Door Security Websocket
-    let mut ws_client =
-        aperture_ws_client::ws_client_setup(WS_BASE_URI, WS_TIMEOUT, command_channel_tx.clone());
+    // Initialize Heartbeat
+    let mut next_heartbeat = Instant::now();
 
-    // Create a thread to handle WebSocket
+    // Create thread to handle system health
     thread::spawn(move || {
         loop {
-            // Check if the WebSocket is closed
-            if !aperture_ws_client::WS_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
-                log::warn!("WebSocket is closed! Reconnecting...");
+            // Sleep for a while
+            thread::sleep(SYSTEM_HEALTH_LOOP_INTERVAL);
 
-                // Nuke the old WebSocket client (calls unsafe destroy method)
-                nuke_ws_client(&ws_client);
+            // Retrieve elapsed time
+            let elapsed = last_tick.load(Ordering::SeqCst).elapsed();
 
-                // Forget the old WebSocket client
-                mem::forget(ws_client);
-
-                // Create a new WebSocket client
-                ws_client = aperture_ws_client::ws_client_setup(
-                    WS_BASE_URI,
-                    WS_TIMEOUT,
-                    command_channel_tx.clone(),
-                );
-            }
-
-            // Set next check time
-            let next_check = Instant::now() + Duration::from_secs(5);
-
-            // Send any reports
-            while let Ok(report) = report_channel_rx.recv_deadline(next_check) {
-                match ws_client.send(
-                    FrameType::Text(false),
-                    serde_json::to_string(&report).unwrap().as_bytes(),
-                ) {
-                    Ok(_) => {
-                        log::info!("Sent report to MANAGE!: {:?}", report);
-                    }
-                    Err(_) => {
-                        log::error!("Failed to send report to MANAGE!: {:?}", report);
-                    }
+            // Display System Status
+            let status_ip_info: String;
+            match eth.eth().netif().get_ip_info() {
+                Ok(ip_info) => {
+                    status_ip_info = format!("IP: {}\n", ip_info.ip);
                 }
+                Err(error) => {
+                    status_ip_info = format!("IP: Not Available! ({:?})\n", error);
+                }
+            }
+            let status = format!(
+                "GUARDIAN SYSTEM STATUS\n---\nOSDP Online: {}\n{}Last Door Tick: {} seconds\n---",
+                PD_ONLINE.load(Ordering::SeqCst),
+                status_ip_info,
+                elapsed.as_secs(),
+            );
+            log::info!("{}", status);
+
+            // Prepare Heartbeat
+            let now = Instant::now();
+            if next_heartbeat < now {
+                next_heartbeat = now + HEARTBEAT_INTERVAL;
+                let is_healthy = elapsed.as_secs() < 2 && PD_ONLINE.load(Ordering::SeqCst);
+                let heartbeat = MANAGEReport::Heartbeat {
+                    is_healthy: is_healthy,
+                };
+                report_channel_tx.send(heartbeat).unwrap();
             }
         }
     });
 
-    // Initialize Heartbeat
-    let mut next_heartbeat = Instant::now();
+    // Connect to MANAGE Door Security Websocket
+    let mut ws_client =
+        aperture_ws_client::ws_client_setup(WS_BASE_URI, WS_TIMEOUT, command_channel_tx.clone());
 
+    // Handle WebSocket Connection
     loop {
-        // Sleep for a while
-        thread::sleep(SYSTEM_HEALTH_LOOP_INTERVAL);
+        // Check if the WebSocket is closed
+        if !aperture_ws_client::WS_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
+            log::warn!("WebSocket is closed! Reconnecting...");
 
-        // Retrieve elapsed time
-        let elapsed = last_tick.load(Ordering::SeqCst).elapsed();
+            // Nuke the old WebSocket client (calls unsafe destroy method)
+            nuke_ws_client(&ws_client);
 
-        // Display System Status
-        let status_ip_info: String;
-        match eth.eth().netif().get_ip_info() {
-            Ok(ip_info) => {
-                status_ip_info = format!("IP: {}\n", ip_info.ip);
-            }
-            Err(error) => {
-                status_ip_info = format!("IP: Not Available! ({:?})\n", error);
-            }
+            // Forget the old WebSocket client
+            mem::forget(ws_client);
+
+            // Create a new WebSocket client
+            ws_client = aperture_ws_client::ws_client_setup(
+                WS_BASE_URI,
+                WS_TIMEOUT,
+                command_channel_tx.clone(),
+            );
         }
-        let status = format!(
-            "GUARDIAN SYSTEM STATUS\n---\nOSDP Online: {}\n{}Last Door Tick: {} seconds\n---",
-            PD_ONLINE.load(Ordering::SeqCst),
-            status_ip_info,
-            elapsed.as_secs(),
-        );
-        log::info!("{}", status);
 
-        // Prepare Heartbeat
-        let now = Instant::now();
-        if next_heartbeat < now {
-            next_heartbeat = now + HEARTBEAT_INTERVAL;
-            let is_healthy = elapsed.as_secs() < 2 && PD_ONLINE.load(Ordering::SeqCst);
-            let heartbeat = MANAGEReport::Heartbeat {
-                is_healthy: is_healthy,
-            };
-            report_channel_tx.send(heartbeat).unwrap();
+        // Set next check time
+        let next_check = Instant::now() + Duration::from_secs(5);
+
+        // Send any reports
+        while let Ok(report) = report_channel_rx.recv_deadline(next_check) {
+            match ws_client.send(
+                FrameType::Text(false),
+                serde_json::to_string(&report).unwrap().as_bytes(),
+            ) {
+                Ok(_) => {
+                    log::info!("Sent report to MANAGE!: {:?}", report);
+                }
+                Err(_) => {
+                    log::error!("Failed to send report to MANAGE!: {:?}", report);
+                }
+            }
         }
     }
 }
