@@ -1,4 +1,5 @@
 #![feature(mpmc_channel)]
+#![feature(deadline_api)]
 
 use std::sync::atomic::Ordering;
 use std::sync::mpmc::sync_channel;
@@ -92,13 +93,13 @@ fn main() {
     let (report_channel_tx, report_channel_rx) = mpsc::channel::<MANAGEReport>();
 
     // Initialize UART for OSDP
-    let osdp_uart_tx = peripherals.pins.gpio33.downgrade_output();
-    let osdp_uart_rx = peripherals.pins.gpio34.downgrade_input();
+    let osdp_uart_tx_pin = peripherals.pins.gpio33.downgrade_output();
+    let osdp_uart_rx_pin = peripherals.pins.gpio34.downgrade_input();
     let osdp_uart_config = config::Config::new().baudrate(Hertz(9_600));
     let osdp_uart = UartDriver::new(
         peripherals.uart1,
-        osdp_uart_tx,
-        osdp_uart_rx,
+        osdp_uart_tx_pin,
+        osdp_uart_rx_pin,
         Option::<Gpio0>::None,
         Option::<Gpio1>::None,
         &osdp_uart_config,
@@ -109,7 +110,7 @@ fn main() {
     // Setup MAX485 REDE Pin
     let osdp_max485_rede_output = peripherals.pins.gpio14.downgrade_output();
     let mut osdp_max485_rede = PinDriver::output(osdp_max485_rede_output).unwrap();
-    print!("OSDP MAX485 REDE Pin Initialized");
+    log::info!("OSDP MAX485 REDE Pin Initialized");
 
     // Initialize Open, Close, Stop/Unlock Pins
     let stop_unlock_pin_output = peripherals.pins.gpio13.downgrade_output();
@@ -141,26 +142,30 @@ fn main() {
     ));
     log::info!("OSDP Serial Channel Initialized");
 
+    // Split the UART into TX and RX
+    let (mut osdp_uart_tx, osdp_uart_rx) = osdp_uart.into_split();
+
     // Create thread to handle serial communication
     thread::spawn(move || {
         loop {
             // Read from UART
-            let mut read_buf = [0u8; 256];
-            match osdp_uart.read(&mut read_buf, delay::NON_BLOCK) {
+            let mut read_buf = [0u8; 1];
+            match osdp_uart_rx.read(&mut read_buf, delay::BLOCK) {
                 Ok(_) => {
+                    // Get the single byte read
+                    let byte = read_buf[0];
+
                     // Write to OSDP Serial RX Queue Producer
-                    for byte in read_buf.iter() {
-                        match osdp_serial_rx_sender.try_send(*byte) {
-                            Ok(_) => {}
-                            Err(error) => match error {
-                                std::sync::mpmc::TrySendError::Full(_) => {
-                                    log::info!("WARNING: OSDP Serial RX Queue Full!");
-                                }
-                                std::sync::mpmc::TrySendError::Disconnected(_) => {
-                                    print!("ERROR: OSDP Serial RX Queue Disconnected!");
-                                }
-                            },
-                        }
+                    match osdp_serial_rx_sender.try_send(byte) {
+                        Ok(_) => {}
+                        Err(error) => match error {
+                            std::sync::mpmc::TrySendError::Full(_) => {
+                                log::info!("WARNING: OSDP Serial RX Queue Full!");
+                            }
+                            std::sync::mpmc::TrySendError::Disconnected(_) => {
+                                print!("ERROR: OSDP Serial RX Queue Disconnected!");
+                            }
+                        },
                     }
                 }
                 // If the EspError is not a timeout, log it
@@ -170,28 +175,40 @@ fn main() {
                     }
                 }
             }
-
-            // Read from OSDP Serial TX Pipe
-            if !osdp_serial_tx_receiver.is_empty() {
-                // Set MAX485 REDE Pin to High
-                osdp_max485_rede.set_high().unwrap();
-
-                // For each byte in the queue, write it to the UART
-                for byte in osdp_serial_tx_receiver.try_iter() {
-                    osdp_uart.write(&[byte]).unwrap();
-                }
-
-                // Wait for UART to finish transmitting
-                osdp_uart.wait_tx_done(delay::BLOCK).unwrap();
-
-                // Set MAX485 REDE Pin to Low
-                osdp_max485_rede.set_low().unwrap();
-            }
-
-            // Yield to other threads
-            thread::sleep(Duration::from_millis(10));
         }
     });
+
+    // Create thread to handle serial communication
+    thread::spawn(move || {
+        loop {
+            // Read from OSDP Serial TX Pipe
+            match osdp_serial_tx_receiver.recv() {
+                Ok(byte) => {
+                    // Set MAX485 REDE Pin to High
+                    osdp_max485_rede.set_high().unwrap();
+
+                    // Write first byte to UART
+                    osdp_uart_tx.write(&[byte]).unwrap();
+
+                    // For each byte in the queue, write it to the UART
+                    for byte in osdp_serial_tx_receiver.try_iter() {
+                        osdp_uart_tx.write(&[byte]).unwrap();
+                    }
+
+                    // Wait for UART to finish transmitting
+                    osdp_uart_tx.wait_done(delay::BLOCK).unwrap();
+
+                    // Set MAX485 REDE Pin to Low
+                    osdp_max485_rede.set_low().unwrap();
+                    // Write to UART
+                }
+                Err(error) => {
+                    log::info!("OSDP Serial TX Queue Disconnected: {:?}", error);
+                }
+            }
+        }
+    });
+
     log::info!("OSDP Serial Thread Initialized");
 
     // Prepare Peripheral Device(s) Info
@@ -294,6 +311,47 @@ fn main() {
     let mut ws_client =
         aperture_ws_client::ws_client_setup(WS_BASE_URI, WS_TIMEOUT, command_channel_tx.clone());
 
+    // Create a thread to handle WebSocket
+    thread::spawn(move || {
+        loop {
+            // Check if the WebSocket is closed
+            if !aperture_ws_client::WS_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
+                log::warn!("WebSocket is closed! Reconnecting...");
+
+                // Nuke the old WebSocket client (calls unsafe destroy method)
+                nuke_ws_client(&ws_client);
+
+                // Forget the old WebSocket client
+                mem::forget(ws_client);
+
+                // Create a new WebSocket client
+                ws_client = aperture_ws_client::ws_client_setup(
+                    WS_BASE_URI,
+                    WS_TIMEOUT,
+                    command_channel_tx.clone(),
+                );
+            }
+
+            // Set next check time
+            let next_check = Instant::now() + Duration::from_secs(5);
+
+            // Send any reports
+            while let Ok(report) = report_channel_rx.recv_deadline(next_check) {
+                match ws_client.send(
+                    FrameType::Text(false),
+                    serde_json::to_string(&report).unwrap().as_bytes(),
+                ) {
+                    Ok(_) => {
+                        log::info!("Sent report to MANAGE!: {:?}", report);
+                    }
+                    Err(_) => {
+                        log::error!("Failed to send report to MANAGE!: {:?}", report);
+                    }
+                }
+            }
+        }
+    });
+
     // Initialize Heartbeat
     let mut next_heartbeat = Instant::now();
 
@@ -311,25 +369,6 @@ fn main() {
             }
         }
 
-        // Check on WebSocket Client
-        // --- WebSocket ---
-        if !aperture_ws_client::WS_OPEN.load(std::sync::atomic::Ordering::SeqCst) {
-            log::warn!("WebSocket is closed! Reconnecting...");
-
-            // Nuke the old WebSocket client (calls unsafe destroy method)
-            nuke_ws_client(&ws_client);
-
-            // Forget the old WebSocket client
-            mem::forget(ws_client);
-
-            // Create a new WebSocket client
-            ws_client = aperture_ws_client::ws_client_setup(
-                WS_BASE_URI,
-                WS_TIMEOUT,
-                command_channel_tx.clone(),
-            );
-        }
-
         // Prepare Heartbeat
         let now = Instant::now();
         if next_heartbeat < now {
@@ -339,21 +378,6 @@ fn main() {
                 is_healthy: elapsed.as_secs() < 2,
             };
             report_channel_tx.send(heartbeat).unwrap();
-        }
-
-        // Send any reports
-        while let Ok(report) = report_channel_rx.try_recv() {
-            match ws_client.send(
-                FrameType::Text(false),
-                serde_json::to_string(&report).unwrap().as_bytes(),
-            ) {
-                Ok(_) => {
-                    log::info!("Sent report to MANAGE!: {:?}", report);
-                }
-                Err(_) => {
-                    log::error!("Failed to send report to MANAGE!: {:?}", report);
-                }
-            }
         }
     }
 }
