@@ -41,7 +41,7 @@ impl Channel for SerialChannel {
                         break;
                     }
                     std::sync::mpmc::TryRecvError::Disconnected => {
-                        println!("ERROR: OSDP Serial RX Queue Disconnected!");
+                        log::error!("ERROR: OSDP Serial RX Queue Disconnected!");
                         return Err(ChannelError::TransportError);
                     }
                 },
@@ -63,7 +63,7 @@ impl Channel for SerialChannel {
                         break;
                     }
                     std::sync::mpmc::TrySendError::Disconnected(_) => {
-                        println!("ERROR: OSDP Serial TX Queue Disconnected!");
+                        log::error!("ERROR: OSDP Serial TX Queue Disconnected!");
                         return Err(ChannelError::TransportError);
                     }
                 },

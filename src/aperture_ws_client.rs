@@ -40,18 +40,17 @@ pub fn ws_client_setup(
 }
 
 fn on_websocket_event(tx: &Sender<MANAGECommand>, event: &Result<WebSocketEvent, EspIOError>) {
-    print!("WebSocket event: ");
     match event {
         Ok(event) => {
             match event.event_type {
                 WebSocketEventType::Connected => {
-                    println!("Connected");
+                    log::info!("Connected to MANAGE!");
                 }
                 WebSocketEventType::Disconnected => {
-                    println!("Disconnected");
+                    log::warn!("Disconnected from MANAGE!");
                 }
                 WebSocketEventType::Text(data) => {
-                    println!("Text: {:?}", data);
+                    log::debug!("WebSocket event: Text: {:?}", data);
                     match serde_json::from_str(data) {
                         Ok(command) => {
                             tx.send(command).unwrap();
@@ -62,17 +61,17 @@ fn on_websocket_event(tx: &Sender<MANAGECommand>, event: &Result<WebSocketEvent,
                     }
                 }
                 WebSocketEventType::Closed => {
-                    println!("Closed! Marking for retry...");
+                    log::warn!("Connection to MANAGE closed! Marking for retry...");
                     WS_OPEN.store(false, Ordering::SeqCst);
                 }
                 // Any other event type
                 _ => {
-                    println!("Event: {:?}", event.event_type);
+                    log::debug!("WebSocket event: Event: {:?}", event.event_type);
                 }
             }
         }
         Err(err) => {
-            println!("Error: {:?}", err);
+            log::error!("Error: {:?}", err);
         }
     }
 }

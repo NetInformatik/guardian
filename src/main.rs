@@ -160,10 +160,10 @@ fn main() {
                         Ok(_) => {}
                         Err(error) => match error {
                             std::sync::mpmc::TrySendError::Full(_) => {
-                                log::info!("WARNING: OSDP Serial RX Queue Full!");
+                                log::warn!("WARNING: OSDP Serial RX Queue Full!");
                             }
                             std::sync::mpmc::TrySendError::Disconnected(_) => {
-                                print!("ERROR: OSDP Serial RX Queue Disconnected!");
+                                log::error!("ERROR: OSDP Serial RX Queue Disconnected!");
                             }
                         },
                     }
