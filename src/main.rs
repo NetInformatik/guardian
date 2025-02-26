@@ -352,20 +352,24 @@ fn main() {
         // Sleep for a while
         thread::sleep(SYSTEM_HEALTH_LOOP_INTERVAL);
 
+        // Retrieve elapsed time
+        let elapsed = last_tick.load(Ordering::SeqCst).elapsed();
+
         // Display System Status
         let status_ip_info: String;
         match eth.eth().netif().get_ip_info() {
             Ok(ip_info) => {
-                status_ip_info = format!("IP: {}\nSubnet: {}\n", ip_info.ip, ip_info.subnet,);
+                status_ip_info = format!("IP: {}\n", ip_info.ip);
             }
             Err(error) => {
-                status_ip_info = format!("No IP Info Available! ({:?})\n", error);
+                status_ip_info = format!("IP: Not Available! ({:?})\n", error);
             }
         }
         let status = format!(
-            "GUARDIAN SYSTEM STATUS\n---\nOSDP Online: {}\n{}---",
+            "GUARDIAN SYSTEM STATUS\n---\nOSDP Online: {}\n{}Last Door Tick: {} seconds\n---",
             PD_ONLINE.load(Ordering::SeqCst),
             status_ip_info,
+            elapsed.as_secs(),
         );
         log::info!("{}", status);
 
@@ -373,7 +377,6 @@ fn main() {
         let now = Instant::now();
         if next_heartbeat < now {
             next_heartbeat = now + HEARTBEAT_INTERVAL;
-            let elapsed = last_tick.load(Ordering::SeqCst).elapsed();
             let is_healthy = elapsed.as_secs() < 2 && PD_ONLINE.load(Ordering::SeqCst);
             let heartbeat = MANAGEReport::Heartbeat {
                 is_healthy: is_healthy,
