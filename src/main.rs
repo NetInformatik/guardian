@@ -374,8 +374,9 @@ fn main() {
         if next_heartbeat < now {
             next_heartbeat = now + HEARTBEAT_INTERVAL;
             let elapsed = last_tick.load(Ordering::SeqCst).elapsed();
+            let is_healthy = elapsed.as_secs() < 2 && PD_ONLINE.load(Ordering::SeqCst);
             let heartbeat = MANAGEReport::Heartbeat {
-                is_healthy: elapsed.as_secs() < 2,
+                is_healthy: is_healthy,
             };
             report_channel_tx.send(heartbeat).unwrap();
         }
