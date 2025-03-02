@@ -261,6 +261,13 @@ fn main() {
                         };
                         osdp_event_report_channel_tx.send(report).unwrap();
                     }
+                    libosdp::OsdpEvent::KeyPress(key_press_event) => {
+                        log::info!("Key Press: {:?}", key_press_event);
+                        let report = MANAGEReport::OsdpKeyPress {
+                            event: key_press_event,
+                        };
+                        osdp_event_report_channel_tx.send(report).unwrap();
+                    }
                     _ => {
                         log::info!("Event: {:?}", event);
                     }

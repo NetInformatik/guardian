@@ -1,4 +1,4 @@
-use libosdp::OsdpEventCardRead;
+use libosdp::{OsdpEventCardRead, OsdpEventKeyPress};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -21,4 +21,6 @@ pub enum MANAGEReport {
     Heartbeat { is_healthy: bool },
     #[serde(rename = "osdp.card_read")]
     OsdpCardRead { event: OsdpEventCardRead },
+    #[serde(rename = "osdp.key_press")]
+    OsdpKeyPress { event: OsdpEventKeyPress },
 }
